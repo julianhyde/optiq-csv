@@ -17,8 +17,12 @@ several important concepts:
 * declaring views in a model JSON file;
 * user-defined table using the Table interface;
 * determining the record type of a table;
-* a simple implementation of Table that enumerates all rows directly;
-* advanced implementation of Table that translates to relational operators using planner rules.
+* a simple implementation of Table, using the ScannableTable interface, that
+  enumerates all rows directly;
+* a more advanced implementation that implements FilterableTable, and can
+  filter out rows according to simple predicates;
+* advanced implementation of Table, using TranslatableTable, that translates
+  to relational operators using planner rules.
 
 ## First queries
 
@@ -47,6 +51,7 @@ sqlline> !tables
 +------------+--------------+-------------+---------------+----------+------+
 | null       | SALES        | DEPTS       | TABLE         | null     | null |
 | null       | SALES        | EMPS        | TABLE         | null     | null |
+| null       | SALES        | HOBBIES     | TABLE         | null     | null |
 | null       | metadata     | COLUMNS     | SYSTEM_TABLE  | null     | null |
 | null       | metadata     | TABLES      | SYSTEM_TABLE  | null     | null |
 +------------+--------------+-------------+---------------+----------+------+
@@ -57,8 +62,8 @@ sqlline> !tables
 behind the scenes.
 It has other commands to query JDBC metadata, such as <code>!columns</code> and <code>!describe</code>.)
 
-As you can see there are 4 tables in the system: tables
-<code>EMPS</code> and <code>DEPTS</code> in the current
+As you can see there are 5 tables in the system: tables
+<code>EMPS</code>, <code>DEPTS</code> and <code>HOBBIES</code> in the current
 <code>SALES</code> schema, and <code>COLUMNS</code> and
 <code>TABLES</code> in the system <code>metadata</code> schema. The
 system tables are always present in Calcite, but the other tables are
@@ -159,12 +164,16 @@ schema, passing in the <code>directory</code> argument from the model file:
 public Schema create(SchemaPlus parentSchema, String name,
     Map<String, Object> operand) {
   String directory = (String) operand.get("directory");
-  Boolean smart = (Boolean) operand.get("smart");
+  String flavorName = (String) operand.get("flavor");
+  CsvTable.Flavor flavor;
+  if (flavorName == null) {
+    flavor = CsvTable.Flavor.SCANNABLE;
+  } else {
+    flavor = CsvTable.Flavor.valueOf(flavorName.toUpperCase());
+  }
   return new CsvSchema(
-      parentSchema,
-      name,
       new File(directory),
-      smart != null && smart);
+      flavor);
 }
 ```
 
@@ -179,7 +188,8 @@ table-functions, but these are advanced features and optiq-csv does
 not support them.) The tables implement Calcite's
 <a href="http://www.hydromatic.net/calcite/apidocs/net/hydromatic/optiq/Table.html">Table</a>
 interface. <code>CsvSchema</code> produces tables that are instances of
-<a href="https://github.com/julianhyde/optiq-csv/blob/master/src/main/java/net/hydromatic/optiq/impl/csv/CsvTable.java">CsvTable</a>.
+<a href="https://github.com/julianhyde/optiq-csv/blob/master/src/main/java/net/hydromatic/optiq/impl/csv/CsvTable.java">CsvTable</a>
+and its sub-classes.
 
 Here is the relevant code from <code>CsvSchema</code>, overriding the
 <code><a href="http://www.hydromatic.net/calcite/apidocs/net/hydromatic/optiq/impl/AbstractSchema.html#getTableMap()">getTableMap()</a></code>
@@ -187,28 +197,46 @@ method in the <code>AbstractSchema</code> base class.
 
 ```java
 protected Map<String, Table> getTableMap() {
-  final ImmutableMap.Builder<String, Table> builder = ImmutableMap.builder();
+  // Look for files in the directory ending in ".csv", ".csv.gz", ".json",
+  // ".json.gz".
   File[] files = directoryFile.listFiles(
       new FilenameFilter() {
         public boolean accept(File dir, String name) {
-          return name.endsWith(".csv");
+          final String nameSansGz = trim(name, ".gz");
+          return nameSansGz.endsWith(".csv")
+              || nameSansGz.endsWith(".json");
         }
       });
   if (files == null) {
     System.out.println("directory " + directoryFile + " not found");
     files = new File[0];
   }
+  // Build a map from table name to table; each file becomes a table.
+  final ImmutableMap.Builder<String, Table> builder = ImmutableMap.builder();
   for (File file : files) {
-    String tableName = file.getName();
-    if (tableName.endsWith(".csv")) {
-      tableName = tableName.substring(
-          0, tableName.length() - ".csv".length());
+    String tableName = trim(file.getName(), ".gz");
+    final String tableNameSansJson = trimOrNull(tableName, ".json");
+    if (tableNameSansJson != null) {
+      JsonTable table = new JsonTable(file);
+      builder.put(tableNameSansJson, table);
+      continue;
     }
-    final CsvTable table;
-    if (smart) {
-      table = new CsvSmartTable(file, null);
-    } else {
-      table = new CsvTable(file, null);
+    tableName = trim(tableName, ".csv");
+
+    // Create different sub-types of table based on the "flavor" attribute.
+    final Table table;
+    switch (flavor) {
+    case SCANNABLE:
+      table = new CsvScannableTable(file, null);
+      break;
+    case FILTERABLE:
+      table = new CsvFilterableTable(file, null);
+      break;
+    case TRANSLATABLE:
+      table = new CsvTranslatableTable(file, null);
+      break;
+    default:
+      throw new AssertionError("Unknown flavor " + flavor);
     }
     builder.put(tableName, table);
   }
@@ -317,8 +345,8 @@ There is an example in <code>model-with-custom-table.json</code>:
           type: 'custom',
           factory: 'net.hydromatic.optiq.impl.csv.CsvTableFactory',
           operand: {
-            file: 'target/test-classes/sales/EMPS.csv',
-            smart: false
+            file: 'target/test-classes/sales/EMPS.csv.gz',
+            flavor: "scannable"
           }
         }
       ]
@@ -347,22 +375,21 @@ The schema is a regular one, and contains a custom table powered by
 <a href="https://github.com/julianhyde/optiq-csv/blob/master/src/main/java/net/hydromatic/optiq/impl/csv/CsvTableFactory.java">net.hydromatic.optiq.impl.csv.CsvTableFactory</a>,
 which implements the Calcite interface
 <a href="http://www.hydromatic.net/calcite/apidocs/net/hydromatic/optiq/TableFactory.html">TableFactory</a>.
+<<<<<<< HEAD
 Its <code>create</code> method instantiates a table,
+=======
+Its <code>create</code> method instantiates a <code>CsvScannableTable</code>,
+>>>>>>> 94dbce4... Add examples of scannable and filterable tables, matching [CALCITE-436] Simpler SPI to query Table.
 passing in the <code>file</code> argument from the model file:
 
 ```java
 public CsvTable create(SchemaPlus schema, String name,
     Map<String, Object> map, RelDataType rowType) {
   String fileName = (String) map.get("file");
-  Boolean smart = (Boolean) map.get("smart");
   final File file = new File(fileName);
   final RelProtoDataType protoRowType =
       rowType != null ? RelDataTypeImpl.proto(rowType) : null;
-  if (smart != null && smart) {
-    return new CsvSmartTable(file, protoRowType);
-  } else {
-    return new CsvTable(file, protoRowType);
-  }
+  return new CsvScannableTable(file, protoRowType);
 }
 ```
 
@@ -370,7 +397,7 @@ Implementing a custom table is often a simpler alternative to implementing
 a custom schema. Both approaches might end up creating a similar implementation
 of the <code>Table</code> interface, but for the custom table you don't
 need to implement metadata discovery. (<code>CsvTableFactory</code>
-creates a <code>CsvTable</code>, just as <code>CsvSchema</code> does,
+creates a <code>CsvScannableTable</code>, just as <code>CsvSchema</code> does,
 but the table implementation does not scan the filesystem for .csv files.)
 
 Custom tables require more work for the author of the model (the author
@@ -440,14 +467,18 @@ What causes the difference in plan? Let's follow the trail of evidence. In the
 <code>smart.json</code> model file, there is just one extra line:
 
 ```json
-smart: true
+flavor: "translatable"
 ```
 
 This causes a <code>CsvSchema</code> to be created with
+<<<<<<< HEAD
 <code>smart = true</code>,
+=======
+<code>flavor = TRANSLATABLE</code>,
+>>>>>>> 94dbce4... Add examples of scannable and filterable tables, matching [CALCITE-436] Simpler SPI to query Table.
 and its <code>createTable</code> method creates instances of
 <a href="https://github.com/julianhyde/optiq-csv/blob/master/src/main/java/net/hydromatic/optiq/impl/csv/CsvSmartTable.java">CsvSmartTable</a>
-rather than a <code>CsvTable</code>.
+rather than a <code>CsvScannableTable</code>.
 
 <code>CsvSmartTable</code> overrides the
 <code><a href="http://www.hydromatic.net/calcite/apidocs/net/hydromatic/optiq/TranslatableTable#toRel()">TranslatableTable.toRel()</a></code>

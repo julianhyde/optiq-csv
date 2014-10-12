@@ -1,0 +1,18 @@
+[
+{
+  EMPNO: 130,
+  HOBBY: "Wine tasting"
+},
+{
+  EMPNO: 110,
+  HOBBY: "Water skiing"
+},
+{
+  EMPNO: 130,
+  HOBBY: "Soccer"
+},
+{
+  EMPNO: 110,
+  HOBBY: "Hawk watching"
+}
+]
