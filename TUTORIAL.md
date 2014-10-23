@@ -87,7 +87,7 @@ Now JOIN and GROUP BY:
 
 ```bash
 sqlline> SELECT d.name, COUNT(*)
-. . . .> FROM emps AS e JOIN depts AS d ON e.deptno = d.deptno
+. . . .> FROM emps as e join depts as d on cast (e.deptno as integer) = d.deptno
 . . . .> GROUP BY d.name;
 +------------+---------+
 |    NAME    | EXPR$1  |
