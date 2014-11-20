@@ -18,7 +18,7 @@ You need Java (1.6 or higher; 1.7 preferred), git and maven (3.0.4 or later).
 ```bash
 $ git clone git://github.com/julianhyde/optiq-csv.git
 $ cd optiq-csv
-$ mvn compile
+$ mvn clean install
 ```
 
 Kick the tires
